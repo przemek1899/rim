@@ -4,7 +4,7 @@
 
 typedef unsigned char uint1_md5; //  8bit
 typedef unsigned int uint4_md5;  // 32bit
-void runMD5(unsigned char* result);
+void runMD5(unsigned char* result, unsigned char * message, int);
 
 __device__ void charMemcpy(uint1_md5 *buffer, uint1_md5 *data, int length);
 
@@ -22,7 +22,7 @@ __device__ void II(uint4_md5 &a, uint4_md5 b, uint4_md5 c, uint4_md5 d, uint4_md
 
 __device__ void transform(const uint1_md5 block[64], uint4_md5 state[4]);
 
-__global__ void generateMD5(uint1_md5*);
+__global__ void generateMD5(uint1_md5*, unsigned char * message, int);
 
 void printResult(unsigned char* result);
 

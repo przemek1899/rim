@@ -57,6 +57,7 @@ char *testPointer;
 
 //declare constant memory
 __constant__ unsigned char padding[64]; 
+unsigned char * message;
 
 __device__ void charMemcpy(uint1_md5 *buffer, uint1_md5 *data, int length){
 
@@ -72,7 +73,7 @@ unsigned char hostPadding[64] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
   };
 
-void runMD5(unsigned char* result){
+void runMD5(unsigned char* result, unsigned char * message_from_host, int length){
 
 	checkCudaErrors(cudaSetDevice(0));
 	//kopiowanie do pamieci stalej urzadzenia
@@ -80,12 +81,16 @@ void runMD5(unsigned char* result){
 
 	//checkCudaErrors(cudaMalloc((void**)&testPointer, 16*sizeof(char)));
 	checkCudaErrors(cudaMalloc((void**)&foundCollision, 16*sizeof(char)));
+	checkCudaErrors(cudaMalloc((void**)&message, length*sizeof(char)));
+
+	checkCudaErrors(cudaMemcpy(message, message_from_host, length*sizeof(char), cudaMemcpyHostToDevice));
 	
-	generateMD5<<<1, 1>>>(foundCollision);
+	generateMD5<<<1, 1>>>(foundCollision, message, length);
 	checkCudaErrors(cudaGetLastError());
 
 	checkCudaErrors(cudaMemcpy(result, foundCollision, 16*sizeof(char), cudaMemcpyDeviceToHost));
 	checkCudaErrors(cudaFree(foundCollision));
+	checkCudaErrors(cudaFree(message));
 
 	//resetowanie urz¹dzenia
 	checkCudaErrors(cudaDeviceReset());
@@ -232,12 +237,12 @@ __device__ void transform(const uint1_md5 block[64], uint4_md5 state[4]){
   // memset(x, 0, sizeof x);
 }
 
-__global__ void generateMD5(uint1_md5* foundCollision){
+__global__ void generateMD5(uint1_md5* foundCollision, unsigned char * message, int message_length){
 
 	uint1_md5 buffer[64]; //bytes that didn't fit in the last chunk
 
-	uint1_md5 message[11] = {'a','l','a',' ', 'm', 'a',' ','k','o','t','a'};
-	uint4_md5 length = 11; // na razie zafiksowane, bo chyba nie bedziemy obliczac w gpu dlugosci stringa
+	//uint1_md5 message[11] = {'a','l','a',' ', 'm', 'a',' ','k','o','t','a'};
+	uint4_md5 length = message_length; // na razie zafiksowane, bo chyba nie bedziemy obliczac w gpu dlugosci stringa
 	// init -----------------------------------------------------
 	// finalize = false;
 	uint4_md5 count[2];   // 64bit counter for number of bits (lo, hi)
@@ -265,7 +270,7 @@ __global__ void generateMD5(uint1_md5* foundCollision){
 	// number of bytes we need to fill in buffer
   uint4_md5 firstpart = 64 - index;
  
-  uint4_md5 i;
+  uint4_md5 i=0;
  
   // transform as many times as possible.
   if (length >= firstpart)
@@ -319,9 +324,9 @@ __global__ void generateMD5(uint1_md5* foundCollision){
   //dla bits
   //length = 8, input = bits
   index = count[0] / 8 % 64; 
-  if ((count[0] += (8 << 3)) < (8 << 3))
-    count[1]++;
-  count[1] += (length >> 29);
+ // if ((count[0] += (8 << 3)) < (8 << 3))
+ //   count[1]++;
+//  count[1] += (length >> 29);
 
   firstpart = 64 - index;
 
@@ -331,8 +336,8 @@ __global__ void generateMD5(uint1_md5* foundCollision){
   transform(buffer, state);
  
   // transform chunks of 64 (64 bytes)
-  for (i = firstpart; i + 64 <= length; i += 64)
-    transform(&bits[i], state);
+//  for (i = firstpart; i + 64 <= length; i += 64)
+ //   transform(&bits[i], state);
 
   // i na razie nie zeruje buffer funkcja memset bo nie wiem po co to/ czy to jest konieczne
 
