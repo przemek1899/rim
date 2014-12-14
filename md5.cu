@@ -1,36 +1,6 @@
-/* MD5
- converted to C++ class by Frank Thilo (thilo@unix-ag.org)
- for bzflag (http://www.bzflag.org)
- 
-   based on:
- 
-   md5.h and md5.c
-   reference implemantion of RFC 1321
- 
-   Copyright (C) 1991-2, RSA Data Security, Inc. Created 1991. All
-rights reserved.
- 
-License to copy and use this software is granted provided that it
-is identified as the "RSA Data Security, Inc. MD5 Message-Digest
-Algorithm" in all material mentioning or referencing this software
-or this function.
- 
-License is also granted to make and use derivative works provided
-that such works are identified as "derived from the RSA Data
-Security, Inc. MD5 Message-Digest Algorithm" in all material
-mentioning or referencing the derived work.
- 
-RSA Data Security, Inc. makes no representations concerning either
-the merchantability of this software or the suitability of this
-software for any particular purpose. It is provided "as is"
-without express or implied warranty of any kind.
- 
-These notices must be retained in any copies of any part of this
-documentation and/or software.
- 
-*/
-
 #include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#include "sm_35_atomic_functions.h"
 #include "md5.cuh"
 #include "helper_cuda.h"
 #include <stdio.h>
@@ -52,20 +22,146 @@ documentation and/or software.
 #define S43 15
 #define S44 21
 
-uint1_md5 *foundCollision; // the result
+#define HASH_LENGTH 16
+
+ // the result
 char *testPointer;
 
 //declare constant memory
 __constant__ unsigned char padding[64]; 
-unsigned char * message;
+__constant__ unsigned char constant_hash[HASH_LENGTH]; //skrot, dla którego bêdziemy szukaæ kolizji
 
-__device__ void charMemcpy(uint1_md5 *buffer, uint1_md5 *data, int length){
+__device__ void checkMD5equality(unsigned char* oryginal, unsigned char * pretender , bool * equality){
+	equality[0]=true;
+	for(int q=0; q<16; q++){
+		if(oryginal[q]!=pretender[q]){ equality[0]=false; break;}
+	}
+}
+
+__device__ int checkEquality(uint1_md5 *generated_hash){
+	//funkcja sprawdza równoœæ wygenerowanego skrótu z docelowym, na ten czas iterujemy ca³¹ pêtlê niesprawdzaj¹c warunku equality==0 co mo¿e okazaæ siê gorszym rozwiazaniem
+	int equality = 1;
+	for(int i=0; i<HASH_LENGTH; i++){
+		equality *= (generated_hash[i] == constant_hash[i]);
+	}
+	return equality;
+}
+
+
+__global__ void generateOryginalHash(uint1_md5 *mess, uint1_md5* oryginalHash){
+				
+				bool equal[1];
+				unsigned char threadMess[128];
+				unsigned char threadHash[16];
+				charMemcpy(threadMess, mess, 128);
+				generateMD5(threadMess, threadHash, 128);
+				
+				charMemcpy( oryginalHash,threadHash, 16);
+			//	printf(" Obliczono wartosc skrotu oryginalnej wiadomosci ");
+			
+}
+__global__ void generateCollision(uint1_md5 *mess, uint1_md5* oryginalHash, uint1_md5* hashCode, int* end){
+				int k = threadIdx.x;
+				int j = blockIdx.x;
+				bool equal[1];
+				unsigned char threadMess[128];
+				unsigned char threadHash[16];
+				
+		for (int i=0; i<256 && end[0]==0; i++){
+				charMemcpy(threadMess, mess, 128);
+
+				//liczenie wektora
+				threadMess[19]= mess[19]+k;
+				threadMess[45]=mess[45]-j;
+				threadMess[59]=mess[59]+i;
+
+				threadMess[83]=mess[83]+k;
+				threadMess[109]=mess[109]+j;
+				threadMess[123]=mess[123]-i;
+	
+				generateMD5(threadMess, threadHash, 128);
+				checkMD5equality(oryginalHash, threadHash, equal); 
+		
+			if(equal[0]& k!=0 && j!=0 && i!=0){
+				charMemcpy( mess,threadMess, 128);
+				charMemcpy(hashCode,threadHash, 16);
+				//zostanie zast¹pione operacj¹ atomow¹
+				//chwilowo problem z obs³ug¹ funkcji atomicAdd
+				//zmiana wartoœci konczy wykonywanie sie wszystkich petli
+					end[0]=2;				
+			}
+		}
+		__syncthreads();
+}
+
+__device__ void printResultDevice(unsigned char* result){
+	char buf[33];
+//	for (int i=0; i<16; i++)
+//		printf( "%02x", result[i]);
+	buf[32]=0;
+	//printf("%s\n", buf);
+}
+__device__ void charMemcpy(unsigned char *buffer, unsigned char *data, int length){
 
 	int i;
+	#pragma unroll
 	for(i=0; i<length; i++){
 		buffer[i] = data[i];
 	}
 }
+
+/*void runMD5(unsigned char *hostPadding, unsigned char* oryginalHash, unsigned char* result){
+	uint1_md5 *hashCode;
+	
+	unsigned char *dev_message;
+	
+	int *end;
+	end[0]=0;
+	checkCudaErrors(cudaSetDevice(0));
+	//kopiowanie do pamieci stalej urzadzenia
+	//JR nie u¿ywam narazie wiec coment
+	//checkCudaErrors(cudaMemcpyToSymbol(padding, hostPadding, sizeof(char)*128, 0, cudaMemcpyHostToDevice));
+
+	//checkCudaErrors(cudaMalloc((void**)&testPointer, 16*sizeof(char)));
+	checkCudaErrors(cudaMalloc((void**)&hashCode, 16*sizeof(char)));
+	checkCudaErrors(cudaMalloc((void**)&dev_oryginalHash, 16*sizeof(char)));
+	checkCudaErrors(cudaMalloc((void**)&dev_message, 128*sizeof(char)));
+	
+	checkCudaErrors(cudaMalloc((void**)&dev_end, 1*sizeof(int)));
+	checkCudaErrors(cudaMemcpy(dev_message, hostPadding, 128 * sizeof(char), cudaMemcpyHostToDevice));
+
+	
+	
+	generateCollision<<<100, 100>>>(dev_message,dev_oryginalHash, hashCode, dev_end);
+	checkCudaErrors(cudaGetLastError());
+	checkCudaErrors(cudaDeviceSynchronize());
+
+	checkCudaErrors(cudaMemcpy(result, hashCode, 16*sizeof(unsigned char), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(oryginalHash, dev_oryginalHash, 16*sizeof(unsigned char), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(hostPadding, dev_message , 128 * sizeof(char), cudaMemcpyDeviceToHost));
+	
+	checkCudaErrors(cudaFree(dev_end));
+	checkCudaErrors(cudaFree(hashCode));
+	checkCudaErrors(cudaFree(dev_oryginalHash));
+	checkCudaErrors(cudaFree(dev_message));
+
+	//resetowanie urz¹dzenia
+	checkCudaErrors(cudaDeviceReset());
+    return;
+}*/
+
+
+
+
+
+
+
+
+//declare constant memory
+
+
+
+
 
 unsigned char hostPadding[64] = {
     0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -73,22 +169,31 @@ unsigned char hostPadding[64] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
   };
 
-void runMD5(unsigned char* result, unsigned char * message_from_host, int length){
-
+uint1_md5 *dev_oryginalHash;
+void runMD5(unsigned char *host_message ,unsigned char* oryginalHash,  unsigned char* result,  int length){
+	uint1_md5 *foundCollision; // the result
+	unsigned char * message;
+	int * dev_end;
 	checkCudaErrors(cudaSetDevice(0));
-	//kopiowanie do pamieci stalej urzadzenia
 	checkCudaErrors(cudaMemcpyToSymbol(padding, &hostPadding, sizeof(char)*64, 0, cudaMemcpyHostToDevice));
+	int end[1];
+	end[0]=0;
 
-	//checkCudaErrors(cudaMalloc((void**)&testPointer, 16*sizeof(char)));
 	checkCudaErrors(cudaMalloc((void**)&foundCollision, 16*sizeof(char)));
+	checkCudaErrors(cudaMalloc((void**)&dev_oryginalHash, 16*sizeof(char)));
 	checkCudaErrors(cudaMalloc((void**)&message, length*sizeof(char)));
+	checkCudaErrors(cudaMalloc((void**)&dev_end, 1*sizeof(int)));
 
-	checkCudaErrors(cudaMemcpy(message, message_from_host, length*sizeof(char), cudaMemcpyHostToDevice));
-	
-	generateMD5<<<1, 1>>>(foundCollision, message, length);
+	checkCudaErrors(cudaMemcpy(message, host_message, length*sizeof(char), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemcpy(dev_end, end, 1 * sizeof(int), cudaMemcpyHostToDevice));
+	generateOryginalHash<<<1, 1>>>(message,dev_oryginalHash);
+	generateCollision<<<1, 1>>>(message,dev_oryginalHash, foundCollision, dev_end);
 	checkCudaErrors(cudaGetLastError());
 
+	checkCudaErrors(cudaMemcpy(oryginalHash, dev_oryginalHash, 16*sizeof(char), cudaMemcpyDeviceToHost));
 	checkCudaErrors(cudaMemcpy(result, foundCollision, 16*sizeof(char), cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy( host_message,message, length*sizeof(char),  cudaMemcpyDeviceToHost));
+	
 	checkCudaErrors(cudaFree(foundCollision));
 	checkCudaErrors(cudaFree(message));
 
@@ -97,13 +202,7 @@ void runMD5(unsigned char* result, unsigned char * message_from_host, int length
     return;
 }
 
-void printResult(unsigned char* result){
-	char buf[33];
-	for (int i=0; i<16; i++)
-		sprintf(buf+i*2, "%02x", result[i]);
-	buf[32]=0;
-	printf("%s\n", buf);
-}
+
 
  
 // F, G, H and I are basic MD5 functions.
@@ -149,8 +248,8 @@ __device__ void II(uint4_md5 &a, uint4_md5 b, uint4_md5 c, uint4_md5 d, uint4_md
 
 __device__ void transform(const uint1_md5 block[64], uint4_md5 state[4]){
 	uint4_md5 a = state[0], b = state[1], c = state[2], d = state[3], x[16];
+
   //decode (x, block, 64);
-  //ponizszy kod zastepuje powyzsza funcke decode
 	for (unsigned int i = 0, j = 0; j < 64; i++, j += 4)
     x[i] = ((uint4_md5)block[j]) | (((uint4_md5)block[j+1]) << 8) |
       (((uint4_md5)block[j+2]) << 16) | (((uint4_md5)block[j+3]) << 24);
@@ -232,122 +331,76 @@ __device__ void transform(const uint1_md5 block[64], uint4_md5 state[4]){
   state[1] += b;
   state[2] += c;
   state[3] += d;
- 
-  // Zeroize sensitive information.
-  // memset(x, 0, sizeof x);
 }
 
-__global__ void generateMD5(uint1_md5* foundCollision, unsigned char * message, int message_length){
+__device__ void generateMD5( unsigned char * message, uint1_md5 digest[HASH_LENGTH], int length){
 
-	uint1_md5 buffer[64]; //bytes that didn't fit in the last chunk
-
-	//uint1_md5 message[11] = {'a','l','a',' ', 'm', 'a',' ','k','o','t','a'};
-	uint4_md5 length = message_length; // na razie zafiksowane, bo chyba nie bedziemy obliczac w gpu dlugosci stringa
-	// init -----------------------------------------------------
-	// finalize = false;
 	uint4_md5 count[2];   // 64bit counter for number of bits (lo, hi)
 	count[0] = 0;
 	count[1] = 0;
 
-	uint4_md5 state[4];
-	// load magic initialization constants.
+	uint4_md5 state[4];		//initial values
 	state[0] = 0x67452301;
 	state[1] = 0xefcdab89;
 	state[2] = 0x98badcfe;
 	state[3] = 0x10325476;
 
-	uint1_md5 digest[16]; // the result
-
 	// update ----------------------------------------------------
-	// compute number of bytes mod 64
-	uint4_md5 index = count[0] / 8 % 64;
+	uint4_md5 index = 0;
 
 	// Update number of bits
 	if ((count[0] += (length << 3)) < (length << 3))
 		count[1]++;
 	count[1] += (length >> 29);
 
-	// number of bytes we need to fill in buffer
-  uint4_md5 firstpart = 64 - index;
+	uint4_md5 firstpart = 64;
+	uint4_md5 i=0;
  
-  uint4_md5 i=0;
- 
-  // transform as many times as possible.
-  if (length >= firstpart)
-  {
-    // fill buffer first, transform
-    charMemcpy(&buffer[index], message, firstpart);
-    transform(buffer, state);
- 
-    // transform chunks of 64 (64 bytes)
-    for (i = firstpart; i + 64 <= length; i += 64)
+	for (i = 0; i + 64 <= length; i += 64)
       transform(&message[i], state);
- 
-    index = 0;
-  }
-  else
-    i = 0;
-  // buffer remaining input
-  charMemcpy(&buffer[index], &message[i], (length-i));
 
-  // finalized --------------------------------------------------------------
-  unsigned char bits[8];
-  //encode(bits, count, 8);
-  for (uint4_md5 i = 0, j = 0; j < 8; i++, j += 4) {
-    bits[j] = count[i] & 0xff;
-    bits[j+1] = (count[i] >> 8) & 0xff;
-    bits[j+2] = (count[i] >> 16) & 0xff;
-    bits[j+3] = (count[i] >> 24) & 0xff;
-  }
-
-  index = count[0] / 8 % 64;
-  uint4_md5 padLen = (index < 56) ? (56 - index) : (120 - index);
-
-  //sekwencyjny kod odniesienia to dwie ponizsze linijki
-  //update(padding, padLen);
-  //update(bits, 8);
-
-  // i teraz zakladam ¿e przepisuje tylko pewien kawalek metody update inny dla padding i inny bits, bo w tym momencie to bedzie transformacja ostatniego bloku
-  //dla padding - nie wykonana zostanie tranformacja (dopiero dla bits)
-  //length = padLen, input = padding
+	i = i * (length >= firstpart);
   
-  // compute number of bytes mod 64
-  index = count[0] / 8 % 64; 
-  // Update number of bits
-  if ((count[0] += (padLen << 3)) < (padLen << 3))
-    count[1]++;
-  count[1] += (padLen >> 29);
+	// buffer remaining input
+	uint1_md5 buffer[64]; //bytes that didn't fit in the last chunk
+	charMemcpy(&buffer[index], &message[i], (length-i));
 
-  // buffer remaining input
-  charMemcpy(&buffer[index], &padding[0], padLen); //padding najprawdopodobniej bedzie gdzies w pamieci dzielonej/shared
+	// finalized --------------------------------------------------------------
+	unsigned char bits[8];
 
-  //dla bits
-  //length = 8, input = bits
-  index = count[0] / 8 % 64; 
- // if ((count[0] += (8 << 3)) < (8 << 3))
- //   count[1]++;
-//  count[1] += (length >> 29);
+	//encode(bits, count, 8);
+	for (uint4_md5 i = 0, j = 0; j < 8; i++, j += 4) {
+		bits[j] = count[i] & 0xff;
+		bits[j+1] = (count[i] >> 8) & 0xff;
+		bits[j+2] = (count[i] >> 16) & 0xff;
+		bits[j+3] = (count[i] >> 24) & 0xff;
+	}
 
-  firstpart = 64 - index;
+	index = count[0] / 8 % 64;
+	uint4_md5 padLen = (index < 56) ? (56 - index) : (120 - index);
+  
+	// compute number of bytes mod 64
+	index = count[0] / 8 % 64; 
 
-  // fill buffer first, transform
-  charMemcpy(&buffer[index], bits, firstpart);
+	if ((count[0] += (padLen << 3)) < (padLen << 3))
+		count[1]++;
+	count[1] += (padLen >> 29);
 
-  transform(buffer, state);
- 
-  // transform chunks of 64 (64 bytes)
-//  for (i = firstpart; i + 64 <= length; i += 64)
- //   transform(&bits[i], state);
+	charMemcpy(&buffer[index], &padding[0], padLen);
 
-  // i na razie nie zeruje buffer funkcja memset bo nie wiem po co to/ czy to jest konieczne
+	//dla bits
+	index = count[0] / 8 % 64; 
+	firstpart = 64 - index;
 
-  // encode(digest, state, 16);
-  for (uint4_md5 i = 0, j = 0; j < 16; i++, j += 4) {
-    digest[j] = state[i] & 0xff;
-    digest[j+1] = (state[i] >> 8) & 0xff;
-    digest[j+2] = (state[i] >> 16) & 0xff;
-    digest[j+3] = (state[i] >> 24) & 0xff;
-  }
-  // i w tym momencie w digest powinien byc wygenerowany skrot
-  charMemcpy(foundCollision, digest, 16);
+	charMemcpy(&buffer[index], bits, firstpart);
+	transform(buffer, state);
+
+	// encode(digest, state, 16);
+	for (uint4_md5 i = 0, j = 0; j < 16; i++, j += 4) {
+		digest[j] = state[i] & 0xff;
+		digest[j+1] = (state[i] >> 8) & 0xff;
+		digest[j+2] = (state[i] >> 16) & 0xff;
+		digest[j+3] = (state[i] >> 24) & 0xff;
+	}
+  //charMemcpy(foundCollision, digest, 16);
 }
