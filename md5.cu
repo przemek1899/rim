@@ -23,26 +23,26 @@
 #define S44 21
 
 #define HASH_LENGTH 16
-
- // the result
-char *testPointer;
+#define MESSAGE_LENGTH 128
 
 //declare constant memory
 __constant__ unsigned char padding[64]; 
-__constant__ unsigned char constant_hash[HASH_LENGTH]; //skrot, dla którego bêdziemy szukaæ kolizji
+__constant__ unsigned char message_to_modify[MESSAGE_LENGTH]; //wiadomoœæ, któr¹ w¹tki bêd¹ modyfikowaæ i dla tak zmodyfikowanej obliczaæ skrót
 
+/*
 __device__ void checkMD5equality(unsigned char* oryginal, unsigned char * pretender , bool * equality){
 	equality[0]=true;
 	for(int q=0; q<16; q++){
 		if(oryginal[q]!=pretender[q]){ equality[0]=false; break;}
 	}
 }
-
-__device__ int checkEquality(uint1_md5 *generated_hash){
-	//funkcja sprawdza równoœæ wygenerowanego skrótu z docelowym, na ten czas iterujemy ca³¹ pêtlê niesprawdzaj¹c warunku equality==0 co mo¿e okazaæ siê gorszym rozwiazaniem
+*/
+__device__ int checkEquality(uint1_md5 *generated_hash, uint1_md5 *original_hash){
+	
 	int equality = 1;
+	#pragma unroll
 	for(int i=0; i<HASH_LENGTH; i++){
-		equality *= (generated_hash[i] == constant_hash[i]);
+		equality *= (generated_hash[i] == original_hash[i]);
 	}
 	return equality;
 }
@@ -50,45 +50,47 @@ __device__ int checkEquality(uint1_md5 *generated_hash){
 
 __global__ void generateOryginalHash(uint1_md5 *mess, uint1_md5* oryginalHash){
 				
-				bool equal[1];
 				unsigned char threadMess[128];
 				unsigned char threadHash[16];
 				charMemcpy(threadMess, mess, 128);
 				generateMD5(threadMess, threadHash, 128);
 				
-				charMemcpy( oryginalHash,threadHash, 16);
+				charMemcpy(oryginalHash,threadHash, 16);
 			//	printf(" Obliczono wartosc skrotu oryginalnej wiadomosci ");
 			
 }
 __global__ void generateCollision(uint1_md5 *mess, uint1_md5* oryginalHash, uint1_md5* hashCode, int* end){
 				int k = threadIdx.x;
 				int j = blockIdx.x;
-				bool equal[1];
+				//bool equal[1];
+				int equal = 0;
 				unsigned char threadMess[128];
 				unsigned char threadHash[16];
 				
-		for (int i=0; i<256 && end[0]==0; i++){
 				charMemcpy(threadMess, mess, 128);
 
-				//liczenie wektora
 				threadMess[19]= mess[19]+k;
 				threadMess[45]=mess[45]-j;
-				threadMess[59]=mess[59]+i;
-
 				threadMess[83]=mess[83]+k;
 				threadMess[109]=mess[109]+j;
+				
+		for (int i=0; i<256 && end[0]==0; i++){
+
+				//modyfikacja wiadomoœci, tak aby ka¿dy w¹tek liczy³ skrót dla innej wiadomoœci
+				threadMess[59]=mess[59]+i;
 				threadMess[123]=mess[123]-i;
 	
 				generateMD5(threadMess, threadHash, 128);
-				checkMD5equality(oryginalHash, threadHash, equal); 
+				//checkMD5equality(oryginalHash, threadHash, equal); 
+				equal = checkEquality(threadHash, oryginalHash);
 		
-			if(equal[0]& k!=0 && j!=0 && i!=0){
-				charMemcpy( mess,threadMess, 128);
+			if(equal && k!=0 && j!=0 && i!=0){
+				charMemcpy(mess,threadMess, 128);
 				charMemcpy(hashCode,threadHash, 16);
 				//zostanie zast¹pione operacj¹ atomow¹
 				//chwilowo problem z obs³ug¹ funkcji atomicAdd
 				//zmiana wartoœci konczy wykonywanie sie wszystkich petli
-					end[0]=2;				
+			    end[0]=2;				
 			}
 		}
 		__syncthreads();
@@ -110,72 +112,21 @@ __device__ void charMemcpy(unsigned char *buffer, unsigned char *data, int lengt
 	}
 }
 
-/*void runMD5(unsigned char *hostPadding, unsigned char* oryginalHash, unsigned char* result){
-	uint1_md5 *hashCode;
-	
-	unsigned char *dev_message;
-	
-	int *end;
-	end[0]=0;
-	checkCudaErrors(cudaSetDevice(0));
-	//kopiowanie do pamieci stalej urzadzenia
-	//JR nie u¿ywam narazie wiec coment
-	//checkCudaErrors(cudaMemcpyToSymbol(padding, hostPadding, sizeof(char)*128, 0, cudaMemcpyHostToDevice));
-
-	//checkCudaErrors(cudaMalloc((void**)&testPointer, 16*sizeof(char)));
-	checkCudaErrors(cudaMalloc((void**)&hashCode, 16*sizeof(char)));
-	checkCudaErrors(cudaMalloc((void**)&dev_oryginalHash, 16*sizeof(char)));
-	checkCudaErrors(cudaMalloc((void**)&dev_message, 128*sizeof(char)));
-	
-	checkCudaErrors(cudaMalloc((void**)&dev_end, 1*sizeof(int)));
-	checkCudaErrors(cudaMemcpy(dev_message, hostPadding, 128 * sizeof(char), cudaMemcpyHostToDevice));
-
-	
-	
-	generateCollision<<<100, 100>>>(dev_message,dev_oryginalHash, hashCode, dev_end);
-	checkCudaErrors(cudaGetLastError());
-	checkCudaErrors(cudaDeviceSynchronize());
-
-	checkCudaErrors(cudaMemcpy(result, hashCode, 16*sizeof(unsigned char), cudaMemcpyDeviceToHost));
-	checkCudaErrors(cudaMemcpy(oryginalHash, dev_oryginalHash, 16*sizeof(unsigned char), cudaMemcpyDeviceToHost));
-	checkCudaErrors(cudaMemcpy(hostPadding, dev_message , 128 * sizeof(char), cudaMemcpyDeviceToHost));
-	
-	checkCudaErrors(cudaFree(dev_end));
-	checkCudaErrors(cudaFree(hashCode));
-	checkCudaErrors(cudaFree(dev_oryginalHash));
-	checkCudaErrors(cudaFree(dev_message));
-
-	//resetowanie urz¹dzenia
-	checkCudaErrors(cudaDeviceReset());
-    return;
-}*/
-
-
-
-
-
-
-
-
-//declare constant memory
-
-
-
-
-
+//declare constant memory - tablica, do wypelniania wiadomoœci zerami - jeden z kroków algorytmu
 unsigned char hostPadding[64] = {
     0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
   };
 
-uint1_md5 *dev_oryginalHash;
 void runMD5(unsigned char *host_message ,unsigned char* oryginalHash,  unsigned char* result,  int length){
+	uint1_md5 *dev_oryginalHash;
 	uint1_md5 *foundCollision; // the result
 	unsigned char * message;
 	int * dev_end;
 	checkCudaErrors(cudaSetDevice(0));
 	checkCudaErrors(cudaMemcpyToSymbol(padding, &hostPadding, sizeof(char)*64, 0, cudaMemcpyHostToDevice));
+	//checkCudaErrors(cudaMemcpyToSymbol(message_to_modify, &host_message, sizeof(char)*MESSAGE_LENGTH, 0, cudaMemcpyHostToDevice));
 	int end[1];
 	end[0]=0;
 
@@ -192,18 +143,17 @@ void runMD5(unsigned char *host_message ,unsigned char* oryginalHash,  unsigned 
 
 	checkCudaErrors(cudaMemcpy(oryginalHash, dev_oryginalHash, 16*sizeof(char), cudaMemcpyDeviceToHost));
 	checkCudaErrors(cudaMemcpy(result, foundCollision, 16*sizeof(char), cudaMemcpyDeviceToHost));
-	checkCudaErrors(cudaMemcpy( host_message,message, length*sizeof(char),  cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(host_message, message, length*sizeof(char),  cudaMemcpyDeviceToHost));
 	
 	checkCudaErrors(cudaFree(foundCollision));
+	checkCudaErrors(cudaFree(dev_oryginalHash));
 	checkCudaErrors(cudaFree(message));
+	checkCudaErrors(cudaFree(dev_end));
 
 	//resetowanie urz¹dzenia
 	checkCudaErrors(cudaDeviceReset());
     return;
 }
-
-
-
  
 // F, G, H and I are basic MD5 functions.
 __device__ uint4_md5 F(uint4_md5 x, uint4_md5 y, uint4_md5 z) {
@@ -349,9 +299,8 @@ __device__ void generateMD5( unsigned char * message, uint1_md5 digest[HASH_LENG
 	uint4_md5 index = 0;
 
 	// Update number of bits
-	if ((count[0] += (length << 3)) < (length << 3))
-		count[1]++;
-	count[1] += (length >> 29);
+	count[0] = count[0] + (length << 3);
+	//jeden element talicay int-ów wystarczy dla wiadomoœci o maksymalnej d³ugoœci 2^32 / 8 bajtow
 
 	uint4_md5 firstpart = 64;
 	uint4_md5 i=0;
@@ -365,10 +314,10 @@ __device__ void generateMD5( unsigned char * message, uint1_md5 digest[HASH_LENG
 	uint1_md5 buffer[64]; //bytes that didn't fit in the last chunk
 	charMemcpy(&buffer[index], &message[i], (length-i));
 
-	// finalized --------------------------------------------------------------
 	unsigned char bits[8];
 
 	//encode(bits, count, 8);
+	#pragma unroll
 	for (uint4_md5 i = 0, j = 0; j < 8; i++, j += 4) {
 		bits[j] = count[i] & 0xff;
 		bits[j+1] = (count[i] >> 8) & 0xff;
@@ -382,9 +331,7 @@ __device__ void generateMD5( unsigned char * message, uint1_md5 digest[HASH_LENG
 	// compute number of bytes mod 64
 	index = count[0] / 8 % 64; 
 
-	if ((count[0] += (padLen << 3)) < (padLen << 3))
-		count[1]++;
-	count[1] += (padLen >> 29);
+	count[0] = count[0] + (padLen << 3);
 
 	charMemcpy(&buffer[index], &padding[0], padLen);
 
@@ -396,11 +343,11 @@ __device__ void generateMD5( unsigned char * message, uint1_md5 digest[HASH_LENG
 	transform(buffer, state);
 
 	// encode(digest, state, 16);
+	#pragma unroll
 	for (uint4_md5 i = 0, j = 0; j < 16; i++, j += 4) {
 		digest[j] = state[i] & 0xff;
 		digest[j+1] = (state[i] >> 8) & 0xff;
 		digest[j+2] = (state[i] >> 16) & 0xff;
 		digest[j+3] = (state[i] >> 24) & 0xff;
 	}
-  //charMemcpy(foundCollision, digest, 16);
 }
